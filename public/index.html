@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASTA MINI • Pair</title>
+<style>
+  :root{--red:#ff1744;--red2:#ff0033;--white:#fff;--bg:#05000a}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{min-height:100vh;background:var(--bg);color:var(--white);font-family:'Segoe UI',system-ui,sans-serif;display:flex;align-items:center;justify-content:center;padding:20px;overflow-x:hidden;position:relative}
+  body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(rgba(255,23,68,.12) 1px,transparent 1px),linear-gradient(90deg,rgba(255,23,68,.12) 1px,transparent 1px);background-size:44px 44px;mask-image:radial-gradient(circle at center,#000 20%,transparent 75%);-webkit-mask-image:radial-gradient(circle at center,#000 20%,transparent 75%);animation:move 6s linear infinite}
+  @keyframes move{to{background-position:44px 44px}}
+  body::after{content:"";position:fixed;width:520px;height:520px;border-radius:50%;background:radial-gradient(circle,rgba(255,0,51,.35),transparent 70%);top:-160px;right:-160px;filter:blur(40px);animation:pulse 4s ease-in-out infinite;pointer-events:none}
+  @keyframes pulse{50%{transform:scale(1.2);opacity:.7}}
+  .card{position:relative;z-index:2;width:100%;max-width:440px;padding:34px 28px;border-radius:22px;background:rgba(10,0,16,.78);backdrop-filter:blur(10px);border:1px solid var(--red);box-shadow:0 0 18px rgba(255,23,68,.7),0 0 60px rgba(255,23,68,.25),inset 0 0 22px rgba(255,23,68,.12);text-align:center}
+  .logo{width:92px;height:92px;border-radius:50%;object-fit:cover;border:2px solid var(--white);box-shadow:0 0 14px #fff,0 0 34px var(--red);margin-bottom:16px}
+  h1{font-size:2rem;letter-spacing:6px;color:var(--white);text-shadow:0 0 6px #fff,0 0 18px var(--red),0 0 40px var(--red2)}
+  h1 span{color:var(--red);text-shadow:0 0 8px var(--red),0 0 24px var(--red2)}
+  .sub{margin:8px 0 26px;font-size:.85rem;letter-spacing:2px;color:#ffd0d8;opacity:.85}
+  input{width:100%;padding:15px 16px;border-radius:12px;background:#0a0010;border:1.5px solid var(--white);color:var(--white);font-size:1.05rem;text-align:center;letter-spacing:2px;outline:none;transition:.25s;box-shadow:0 0 8px rgba(255,255,255,.35)}
+  input::placeholder{color:#8a7a85;letter-spacing:1px}
+  input:focus{border-color:var(--red);box-shadow:0 0 16px var(--red),0 0 34px rgba(255,23,68,.4)}
+  button{margin-top:16px;width:100%;padding:15px;border:none;border-radius:12px;cursor:pointer;font-weight:700;font-size:1rem;letter-spacing:3px;color:#fff;background:linear-gradient(90deg,var(--red2),var(--red));box-shadow:0 0 16px var(--red),0 0 40px rgba(255,0,51,.5);transition:.25s}
+  button:hover{transform:translateY(-2px);box-shadow:0 0 24px var(--red),0 0 60px var(--red2)}
+  button:disabled{opacity:.6;cursor:wait;transform:none}
+  #result{margin-top:24px;display:none}
+  .label{font-size:.8rem;letter-spacing:2px;color:#ffd0d8;margin-bottom:12px}
+  .code{display:flex;justify-content:center;gap:6px;flex-wrap:wrap;margin-bottom:10px;cursor:pointer}
+  .code span{min-width:34px;padding:12px 6px;font-size:1.5rem;font-weight:800;border-radius:9px;background:#0a0010;border:1.5px solid var(--red);color:#fff;text-shadow:0 0 8px #fff,0 0 14px var(--red);box-shadow:0 0 10px rgba(255,23,68,.7)}
+  .code span.dash{min-width:12px;border:none;background:none;box-shadow:none;padding:12px 0;color:var(--red)}
+  .hint{font-size:.78rem;color:#c9b3bb;line-height:1.6}
+  .status{display:inline-block;margin-top:14px;padding:7px 16px;border-radius:30px;font-size:.8rem;letter-spacing:2px;border:1px solid var(--white);box-shadow:0 0 10px rgba(255,255,255,.4)}
+  .status.ok{border-color:#00ff88;color:#00ff88;box-shadow:0 0 14px #00ff88}
+  .err{margin-top:16px;color:var(--red);font-size:.85rem;text-shadow:0 0 8px var(--red);display:none}
+  .foot{margin-top:26px;font-size:.72rem;letter-spacing:2px;color:#9a8a92}
+  .foot b{color:var(--red);text-shadow:0 0 8px var(--red)}
+</style>
+</head>
+<body>
+<div class="card">
+  <img class="logo" src="https://files.catbox.moe/ghavso.webp" alt="logo" onerror="this.style.display='none'">
+  <h1>ASTA <span>MINI</span></h1>
+  <p class="sub">WHATSAPP BOT • PAIRING PORTAL</p>
+
+  <input id="num" type="tel" inputmode="numeric" placeholder="94771234567" autocomplete="off">
+  <button id="btn">GET PAIR CODE</button>
+  <div class="err" id="err"></div>
+
+  <div id="result">
+    <div class="label">YOUR PAIRING CODE</div>
+    <div class="code" id="code" title="Tap to copy"></div>
+    <div class="hint">WhatsApp ▸ Linked Devices ▸ Link with phone number<br>Me code eka WhatsApp ekata danna (tap code to copy)</div>
+    <div class="status" id="status">WAITING FOR LINK...</div>
+  </div>
+
+  <div class="foot">ONLINE SESSIONS : <b id="online">0</b></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let timer;
+
+async function info(){ try{ const r=await (await fetch('/api/info')).json(); $('online').textContent=r.online; }catch{} }
+info(); setInterval(info,15000);
+
+$('btn').onclick = async () => {
+  const number = $('num').value.replace(/\D/g,'');
+  $('err').style.display='none'; $('result').style.display='none'; clearInterval(timer);
+  if(number.length < 8){ $('err').textContent='Country code ekka number eka danna (e.g. 94771234567)'; $('err').style.display='block'; return; }
+
+  $('btn').disabled=true; $('btn').textContent='GENERATING...';
+  try{
+    const r = await (await fetch('/api/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({number})})).json();
+    if(!r.ok) throw new Error(r.error || 'Failed');
+    $('code').innerHTML = r.code.split('').map(c => c==='-' ? '<span class="dash">-</span>' : `<span>${c}</span>`).join('');
+    $('code').onclick = () => navigator.clipboard?.writeText(r.code);
+    $('status').className='status'; $('status').textContent='WAITING FOR LINK...';
+    $('result').style.display='block';
+    timer = setInterval(async()=>{
+      try{
+        const s = await (await fetch('/api/status/'+number)).json();
+        if(s.status==='open'){ $('status').className='status ok'; $('status').textContent='✅ CONNECTED'; clearInterval(timer); info(); }
+      }catch{}
+    },3000);
+  }catch(e){ $('err').textContent=e.message; $('err').style.display='block'; }
+  $('btn').disabled=false; $('btn').textContent='GET PAIR CODE';
+};
+$('num').addEventListener('keydown',e=>{ if(e.key==='Enter') $('btn').click(); });
+</script>
+</body>
+</html>
