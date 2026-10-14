@@ -1,17 +1,16 @@
 {
   "name": "asta-mini",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "ASTA MINI - WhatsApp multi-device bot with web pairing",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
-    "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "^6.7.9",
+    "@whiskeysockets/baileys": "latest",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "mongodb": "^6.8.0",
