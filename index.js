@@ -1,4 +1,6 @@
 require('dotenv').config();
+require('./lib/quietLogs');
+
 const express = require('express');
 const path = require('path');
 const config = require('./config');
@@ -31,6 +33,14 @@ app.post('/api/pair', async (req, res) => {
     res.status(400).json({ ok: false, error: e.message });
   }
 });
+
+// Heroku restart / deploy ekedi sessions graceful widiyata close karanna
+// (keys Mongo ekata liyawenna kalin process eka maruwenna ba)
+process.on('SIGTERM', async () => {
+  try { await manager.shutdown(); } finally { process.exit(0); }
+});
+process.on('unhandledRejection', e => console.error('unhandledRejection:', e?.message || e));
+process.on('uncaughtException', e => console.error('uncaughtException:', e?.message || e));
 
 app.listen(config.port, async () => {
   console.log(`🌐 Web running on port ${config.port}`);
