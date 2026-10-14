@@ -1,7 +1,7 @@
-const config = require('../config');
+// LakVision API (private) - key eka methanama
+const BASE = 'https://tobi-apisiii-production-f83b.up.railway.app/api/lakvision';
+const KEY = 'tobi_live_e53384555640af9573048f47';
 
-const BASE = config.lakvision.base;
-const KEY = config.lakvision.apikey;
 const busy = new Set(); // number -> eka welawata download ekak witharai
 
 const https = u => (u || '').replace(/^http:\/\//i, 'https://');
@@ -10,7 +10,6 @@ const trim = (s, n = 70) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 const fileSafe = s => String(s).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
 
 async function api(endpoint, params = {}) {
-  if (!KEY) throw new Error('LAKVISION_API_KEY env variable set karala na');
   const url = new URL(`${BASE}/${endpoint}`);
   for (const [k, v] of Object.entries({ ...params, apikey: KEY })) url.searchParams.set(k, v);
 
