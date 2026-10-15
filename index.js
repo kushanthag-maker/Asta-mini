@@ -20,6 +20,11 @@ app.get('/api/status/:number', (req, res) =>
   res.json({ ok: true, status: manager.getStatus(String(req.params.number).replace(/\D/g, '')) })
 );
 
+// ===== FIX 4: Keep-alive endpoint (UptimeRobot එකට මේක use කරන්න) =====
+app.get('/ping', (req, res) => {
+  res.json({ ok: true, time: Date.now(), uptime: Math.floor(process.uptime()) });
+});
+
 app.post('/api/pair', async (req, res) => {
   try {
     const number = String(req.body.number || '').replace(/\D/g, '');
@@ -34,8 +39,6 @@ app.post('/api/pair', async (req, res) => {
   }
 });
 
-// Heroku restart / deploy ekedi sessions graceful widiyata close karanna
-// (keys Mongo ekata liyawenna kalin process eka maruwenna ba)
 process.on('SIGTERM', async () => {
   try { await manager.shutdown(); } finally { process.exit(0); }
 });
