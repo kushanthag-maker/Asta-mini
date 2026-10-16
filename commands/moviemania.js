@@ -6,6 +6,7 @@ const KEY = 'tobi_live_e7cd4575c745f543638747ed';
 
 const LIMIT = 10;
 const MAX_BYTES = 1.9 * 1024 ** 3; // WhatsApp document limit ~2GB
+const RESOLUTIONS = [480, 720, 1080]; // hama movie ekatama me 3 slots penawanawa
 const busy = new Set(); // number -> eka welawata download ekak witharai
 
 const https = u => (u || '').replace(/^http:\/\//i, 'https://');
@@ -13,6 +14,7 @@ const clean = s => String(s || '').replace(/apikey=[^&\s]+/gi, 'apikey=***'); //
 const cut = (s, n) => (String(s || '').length > n ? String(s).slice(0, n - 1) + '…' : String(s || ''));
 const fileSafe = s => String(s).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
 const fmtSize = b => (b >= 1024 ** 3 ? (b / 1024 ** 3).toFixed(2) + ' GB' : (b / 1024 ** 2).toFixed(1) + ' MB');
+const log = (...a) => console.log('[mm]', ...a);
 
 // "858MB" / "1.58GB" -> bytes
 function sizeToBytes(s) {
@@ -21,6 +23,12 @@ function sizeToBytes(s) {
   const u = m[2].toUpperCase();
   return parseFloat(m[1]) * (u === 'GB' ? 1024 ** 3 : u === 'MB' ? 1024 ** 2 : 1024);
 }
+
+// "720p" / "HD 720p" -> 720
+const resOf = d => {
+  const m = String(d.resolution || '').match(/\d{3,4}/) || String(d.quality || '').match(/\d{3,4}/);
+  return m ? parseInt(m[0], 10) : 0;
+};
 
 async function api(endpoint, params = {}) {
   const url = new URL(`${BASE}/${endpoint}`);
@@ -36,16 +44,20 @@ async function api(endpoint, params = {}) {
 
 // ---------- 1) SEARCH ----------
 async function showSearch(c, query, page = 1) {
-  const data = await api('search', { q: query, limit: LIMIT, page });
-  const results = data.results || [];
+  const params = { q: query, limit: LIMIT };
+  if (page > 1) params.page = page;
+
+  const data = await api('search', params);
+  const results = data.results || data.data || [];
+  log(`search "${query}" page=${page} -> ${results.length} results`);
   if (!results.length) return c.reply(`❌ ${c.font('no results for')} "${query}"`);
 
-  const hasNext = (data.total || 0) > page * LIMIT;
+  const hasNext = data.total ? data.total > page * LIMIT : results.length >= LIMIT;
 
   let text =
 `╭━━〔 ${c.font('moviemania search')} 〕━━⬣
 ┃ 🔎 ${c.font('query')} : ${query}
-┃ 📄 ${c.font('page')} : ${page} • ${c.font('total')} : ${data.total ?? results.length}
+┃ 📄 ${c.font('page')} : ${page}${data.total ? ` • ${c.font('total')} : ${data.total}` : ''}
 ╰━━━━━━━━━━━━━━⬣\n\n`;
 
   results.forEach((r, i) => {
@@ -72,20 +84,28 @@ async function showSearch(c, query, page = 1) {
       await c2.reply(`❌ 1 - ${results.length} athara number ekak danna`);
       return true;
     }
-    await showInfo(c2, results[n - 1]).catch(e => c2.reply(`❌ ${clean(e.message)}`));
+    await showInfo(c2, results[n - 1]).catch(e => {
+      console.error('[mm] info error:', clean(e.message));
+      return c2.reply(`❌ ${clean(e.message)}`);
+    });
     return true;
   });
 }
 
-// ---------- 2) INFO + QUALITY ----------
+// ---------- 2) INFO + QUALITY (480p / 720p / 1080p) ----------
 async function showInfo(c, item) {
-  const { movie } = await api('info', { id: item.id });
-  const m = movie || {};
+  const j = await api('info', { id: item.id });
+  const m = j.movie || j.data || j;
 
-  // 480p / 720p / 1080p - podi ewa issellama
-  const downloads = (m.downloads || [])
-    .filter(d => d.directDownloadUrl || d.url)
-    .sort((a, b) => parseInt(a.resolution, 10) - parseInt(b.resolution, 10));
+  const downloads = (m.downloads || []).filter(d => d.directDownloadUrl || d.url);
+  log(`info ${item.id} -> downloads: ${downloads.map(d => `${resOf(d) || d.quality}(${d.size || '?'})`).join(', ') || 'none'}`);
+
+  // slot 1 = 480p, slot 2 = 720p, slot 3 = 1080p (nathi ewa "not available" kiyala pennanawa)
+  let slots = RESOLUTIONS.map(r => ({ res: `${r}p`, d: downloads.find(d => resOf(d) === r) || null }));
+  if (!slots.some(s => s.d)) {
+    // me 3 ma nathnam thiyena ewa penawanawa
+    slots = downloads.map(d => ({ res: d.resolution || d.quality || '?', d }));
+  }
 
   const title = m.title || item.title || 'Unknown';
   const poster = m.poster || item.poster || m.backdrop || '';
@@ -99,14 +119,16 @@ async function showInfo(c, item) {
 ┃ 🌍 ${cut(m.country || '-', 30)}
 ┃ 💿 ${m.quality || '-'}
 ╰━━━━━━━━━━━━━━⬣\n`;
-  if (m.description) caption += `\n📝 ${cut(m.description, 260)}\n`;
+  if (m.description) caption += `\n📝 ${cut(m.description, 240)}\n`;
 
-  if (!downloads.length) {
+  if (!slots.length) {
     caption += `\n❌ ${c.font('no download links for this one')}`;
   } else {
     caption += `\n`;
-    downloads.forEach((d, i) => {
-      caption += `*${i + 1}* ➤ ${d.resolution || d.quality}${d.size ? ` • ${d.size}` : ''}\n`;
+    slots.forEach((s, i) => {
+      caption += s.d
+        ? `*${i + 1}* ➤ ${s.res}${s.d.size ? ` • ${s.d.size}` : ''}\n`
+        : `*${i + 1}* ➤ ${s.res} • ❌ ${c.font('not available')}\n`;
     });
     caption += `\n↩️ ${c.font('reply with a number to download')}`;
   }
@@ -116,21 +138,28 @@ async function showInfo(c, item) {
   try {
     if (!poster) throw new Error('no poster');
     sent = await c.sock.sendMessage(c.from, { image: { url: https(poster) }, caption }, { quoted: c.m });
-  } catch {
+  } catch (e) {
+    log('poster send failed, sending text only:', e.message);
     sent = await c.reply(caption); // poster nathnam / fail unoth text witharak
   }
-  if (!downloads.length) return;
+  if (!slots.length) return;
 
   c.waitReply(sent, async (c2, input) => {
-    const t = input.trim();
+    const t = input.trim().toLowerCase().replace(/p$/, '');
     if (!/^\d+$/.test(t)) return false;
 
     const n = parseInt(t, 10);
-    if (n < 1 || n > downloads.length) {
-      await c2.reply(`❌ 1 - ${downloads.length} athara number ekak danna`);
+    // "1/2/3" ho "480/720/1080" dekama wada
+    const slot = n >= 1 && n <= slots.length ? slots[n - 1] : slots.find(s => parseInt(s.res, 10) === n);
+    if (!slot) {
+      await c2.reply(`❌ 1 - ${slots.length} athara number ekak danna`);
       return true;
     }
-    await download(c2, m, title, downloads[n - 1]);
+    if (!slot.d) {
+      await c2.reply(`❌ ${slot.res} ${c2.font('is not available for this movie')}`);
+      return true;
+    }
+    await download(c2, m, title, slot);
     return true;
   });
 }
@@ -146,7 +175,8 @@ async function openFirst(urls) {
       const res = await fetch(u, { signal: ac.signal, redirect: 'follow' });
       clearTimeout(timer);
       const type = (res.headers.get('content-type') || '').toLowerCase();
-      const isFile = res.ok && !type.includes('json') && !type.includes('html') && !type.startsWith('text/');
+      const isFile = res.ok && res.body && !type.includes('json') && !type.includes('html') && !type.startsWith('text/');
+      log(`open ${clean(u).slice(0, 80)} -> ${res.status} ${type} ${res.headers.get('content-length') || '?'} bytes`);
       if (isFile) return { res, ac };
 
       const body = await res.text().catch(() => '');
@@ -160,11 +190,12 @@ async function openFirst(urls) {
   throw new Error(errors.join(' | '));
 }
 
-async function download(c, m, title, d) {
+async function download(c, m, title, slot) {
   if (busy.has(c.number)) {
     return c.reply(`⏳ ${c.font('another download is running, please wait')}`);
   }
 
+  const d = slot.d;
   const declared = sizeToBytes(d.size);
   if (declared > MAX_BYTES) {
     return c.reply(
@@ -189,11 +220,10 @@ async function download(c, m, title, d) {
       );
     }
 
-    const res_ = d.resolution || d.quality || '';
-    const fileName = `${fileSafe(title)}${m.year ? ` (${m.year})` : ''} [${res_}].mp4`;
+    const fileName = `${fileSafe(title)}${m.year ? ` (${m.year})` : ''} [${slot.res}].mp4`;
 
     await c.reply(
-      `⬇️ ${c.font('downloading')} *${res_}*${size ? ` (${fmtSize(size)})` : ''} ...\n` +
+      `⬇️ ${c.font('downloading')} *${slot.res}*${size ? ` (${fmtSize(size)})` : ''} ...\n` +
       `${c.font('big files take a few minutes, please wait')}`
     );
 
@@ -201,18 +231,20 @@ async function download(c, m, title, d) {
     // Baileys eka chunk by chunk encrypt karala disk (tmp) ekata liyala upload karanawa,
     // so full movie eka RAM ekata load wenne na.
     source = Readable.fromWeb(res.body);
+    log(`sending ${fileName} (${size ? fmtSize(size) : 'unknown size'})`);
     await c.sock.sendMessage(
       c.from,
       {
         document: { stream: source },
         mimetype: 'video/mp4',
         fileName,
-        caption: `🎬 ${title}${m.year ? ` (${m.year})` : ''}\n📺 ${res_}${size ? ` • ${fmtSize(size)}` : ''}\n\n> ${c.config.footer}`
+        caption: `🎬 ${title}${m.year ? ` (${m.year})` : ''}\n📺 ${slot.res}${size ? ` • ${fmtSize(size)}` : ''}\n\n> ${c.config.footer}`
       },
       { quoted: c.m }
     );
+    log('sent OK');
   } catch (e) {
-    console.error('MovieMania download error:', clean(e.stack || e.message));
+    console.error('[mm] download error:', clean(e.stack || e.message));
     await c.reply(
       `❌ ${c.font('download failed')}\n${clean(e.message).slice(0, 300)}\n\n` +
       `${c.font('try a lower quality')}`
@@ -236,7 +268,7 @@ module.exports = {
     try {
       await showSearch(c, c.text, 1);
     } catch (e) {
-      console.error('MovieMania search error:', clean(e.message));
+      console.error('[mm] search error:', clean(e.message));
       await c.reply(`❌ ${clean(e.message)}`);
     }
   }
