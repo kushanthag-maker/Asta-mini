@@ -5,6 +5,7 @@ WhatsApp multi-device bot with a web pairing page and MongoDB-backed authenticat
 ## Requirements
 - Node.js 20 or 22
 - MongoDB database
+- `ffmpeg` available on `PATH` (MovieMania converts the provider's MKV stream to a fragmented MP4 document)
 - API credentials for any optional external commands you want to use
 
 ## Setup
@@ -16,7 +17,7 @@ WhatsApp multi-device bot with a web pairing page and MongoDB-backed authenticat
 
 ## Environment variables
 - `PORT`, `PREFIX`, `BOT_NAME`, `BOT_LOGO`, `BOT_FOOTER`
-- `MONGODB_URI`, optional `MONGODB_DB`
+- `MONGODB_URI`, optional `MONGODB_DB`, optional `FFMPEG_PATH`
 - `LAKVISION_API_KEY`, `MOVIEMANIA_API_KEY`, `TIKTOK_API_KEY`, `WPREACT_API_KEY`
 
 ## Security notes
