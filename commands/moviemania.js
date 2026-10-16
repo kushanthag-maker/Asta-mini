@@ -3,7 +3,8 @@ const { spawn } = require('child_process');
 
 // MovieMania API (private) - key eka methanama
 const BASE = 'https://tobi-apisiii-production.up.railway.app/api/moviemania';
-const KEY = process.env.MOVIEMANIA_API_KEY;
+// MovieMania API key for the owner's private API service.
+const KEY = 'tobi_live_e7cd4575c745f543638747ed';
 
 const LIMIT = 10;
 const MAX_BYTES = 1.9 * 1024 ** 3; // WhatsApp document limit ~2GB
@@ -32,7 +33,6 @@ const resOf = d => {
 };
 
 async function api(endpoint, params = {}) {
-  if (!KEY) throw new Error('MOVIEMANIA_API_KEY is not configured');
   const url = new URL(`${BASE}/${endpoint}`);
   for (const [k, v] of Object.entries({ ...params, apikey: KEY })) url.searchParams.set(k, v);
 
