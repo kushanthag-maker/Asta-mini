@@ -1,8 +1,11 @@
+const { Readable } = require('stream');
+
 // LakVision API (private) - key eka methanama
 const BASE = 'https://tobi-apisiii-production-f83b.up.railway.app/api/lakvision';
-const KEY = process.env.LAKVISION_API_KEY || '';
+const KEY = 'tobi_live_e53384555640af9573048f47';
 
 const busy = new Set(); // number -> eka welawata download ekak witharai
+const MAX_BYTES = 1.9 * 1024 ** 3; // WhatsApp document limit ~2GB
 
 const https = u => (u || '').replace(/^http:\/\//i, 'https://');
 const clean = s => String(s || '').replace(/apikey=[^&\s]+/gi, 'apikey=***'); // key leak wenna epa
@@ -10,7 +13,6 @@ const trim = (s, n = 70) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 const fileSafe = s => String(s).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
 
 async function api(endpoint, params = {}) {
-  if (!KEY) throw new Error('API key missing: set the required API key in environment variables');
   const url = new URL(`${BASE}/${endpoint}`);
   for (const [k, v] of Object.entries({ ...params, apikey: KEY })) url.searchParams.set(k, v);
 
@@ -114,46 +116,94 @@ async function showInfo(c, item) {
 }
 
 // ---------- 3) DOWNLOAD (stream -> WhatsApp document) ----------
+const fmtSize = b => (b >= 1024 ** 3 ? (b / 1024 ** 3).toFixed(2) + ' GB' : (b / 1024 ** 2).toFixed(1) + ' MB');
+
+// URLs list eken mulinma wada karana eka open karanawa (body eka read karanne na)
+async function openFirst(urls) {
+  const errors = [];
+  for (const u of urls) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 60000); // headers enakan witharai timeout
+    try {
+      const res = await fetch(u, { signal: ac.signal, redirect: 'follow' });
+      clearTimeout(timer);
+      const type = (res.headers.get('content-type') || '').toLowerCase();
+      const isFile = res.ok && !type.includes('json') && !type.includes('html') && !type.startsWith('text/');
+      if (isFile) return { res, ac };
+
+      const body = await res.text().catch(() => '');
+      errors.push(`${res.status} ${body.replace(/\s+/g, ' ').slice(0, 150)}`);
+      ac.abort();
+    } catch (e) {
+      clearTimeout(timer);
+      errors.push(e.message);
+    }
+  }
+  throw new Error(errors.join(' | '));
+}
+
 async function download(c, data, title, stream) {
   if (busy.has(c.number)) {
     return c.reply(`⏳ ${c.font('another download is running, please wait')}`);
   }
   busy.add(c.number);
 
+  let opened;
+  let source;
   try {
-    const url =
-      https(stream.directDownloadUrl) ||
-      `${BASE}/download?id=${data.id}&quality=${parseInt(stream.quality, 10)}&direct=true&apikey=${KEY}`;
+    const q = parseInt(stream.quality, 10);
+    const urls = [
+      https(stream.directDownloadUrl),
+      `${BASE}/download?id=${data.id}&resolution=${q}&direct=true&apikey=${KEY}`,
+      https(stream.streamUrl)
+    ].filter((u, i, a) => u && a.indexOf(u) === i);
 
-    const fmt = String(stream.format || 'mp4').toLowerCase();
-    const ext = fmt === 'mkv' ? 'mkv' : 'mp4';
-    const mimetype = ext === 'mkv' ? 'video/x-matroska' : 'video/mp4';
+    opened = await openFirst(urls);
+    const { res } = opened;
+
+    const size = Number(res.headers.get('content-length') || 0);
+    if (size > MAX_BYTES) {
+      return c.reply(
+        `❌ ${c.font('file is too big for whatsapp')} (${fmtSize(size)})\n` +
+        `${c.font('try a lower quality')} (720p / 480p)`
+      );
+    }
+
+    const type = (res.headers.get('content-type') || '').toLowerCase();
+    const disp = res.headers.get('content-disposition') || '';
+    const extFromDisp = (disp.match(/filename\*?=(?:UTF-8'')?"?[^";]*\.(\w{2,4})"?/i) || [])[1];
+    const ext = (extFromDisp || (/matroska|mkv/.test(type) || String(stream.format).toLowerCase() === 'mkv' ? 'mkv' : 'mp4')).toLowerCase();
+    const mimetype = type.startsWith('video/') ? type.split(';')[0] : ext === 'mkv' ? 'video/x-matroska' : 'video/mp4';
     const fileName = `${fileSafe(title)} [${stream.quality}].${ext}`;
 
     await c.reply(
-      `⬇️ ${c.font('downloading')} *${stream.quality}* ...\n` +
+      `⬇️ ${c.font('downloading')} *${stream.quality}*${size ? ` (${fmtSize(size)})` : ''} ...\n` +
       `${c.font('big files take a few minutes, please wait')}`
     );
 
-    // { url } dunnama Baileys eka ama file eka STREAM karala upload karanawa
-    // (RAM ekata full movie eka load wenne na)
+    // API response body eka STREAM ekak widiyata Baileys ekata denawa.
+    // Baileys eka chunk by chunk encrypt karala disk (tmp) ekata liyala upload karanawa,
+    // so full movie eka RAM ekata load wenne na.
+    source = Readable.fromWeb(res.body);
     await c.sock.sendMessage(
       c.from,
       {
-        document: { url },
+        document: { stream: source },
         mimetype,
         fileName,
-        caption: `🎬 ${title}\n📺 ${stream.quality}\n\n> ${c.config.footer}`
+        caption: `🎬 ${title}\n📺 ${stream.quality}${size ? `\n📦 ${fmtSize(size)}` : ''}\n\n> ${c.config.footer}`
       },
       { quoted: c.m }
     );
   } catch (e) {
     console.error('LakVision download error:', clean(e.stack || e.message));
     await c.reply(
-      `❌ ${c.font('download failed')}\n${clean(e.message)}\n\n` +
+      `❌ ${c.font('download failed')}\n${clean(e.message).slice(0, 300)}\n\n` +
       `${c.font('try a lower quality')} (720p / 480p)`
     );
   } finally {
+    try { source?.destroy(); } catch {}
+    try { opened?.ac.abort(); } catch {}
     busy.delete(c.number);
   }
 }
