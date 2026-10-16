@@ -2,7 +2,7 @@ const { Readable } = require('stream');
 
 // LakVision API (private) - key eka methanama
 const BASE = 'https://tobi-apisiii-production-f83b.up.railway.app/api/lakvision';
-const KEY = 'tobi_live_e53384555640af9573048f47';
+const KEY = process.env.LAKVISION_API_KEY;
 
 const busy = new Set(); // number -> eka welawata download ekak witharai
 const MAX_BYTES = 1.9 * 1024 ** 3; // WhatsApp document limit ~2GB
@@ -13,6 +13,7 @@ const trim = (s, n = 70) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 const fileSafe = s => String(s).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
 
 async function api(endpoint, params = {}) {
+  if (!KEY) throw new Error('LAKVISION_API_KEY is not configured');
   const url = new URL(`${BASE}/${endpoint}`);
   for (const [k, v] of Object.entries({ ...params, apikey: KEY })) url.searchParams.set(k, v);
 
@@ -217,6 +218,9 @@ module.exports = {
     if (!c.text) {
       return c.reply(`📌 ${c.font('usage')} : ${c.prefix}lakvision deweni`);
     }
+    // The upstream search can take time. Reply before waiting on the API so
+    // the user knows the bot received the command.
+    await c.reply(`⏳ ${c.font('searching lakvision, please wait...')}`);
     try {
       await showSearch(c, c.text, 1);
     } catch (e) {

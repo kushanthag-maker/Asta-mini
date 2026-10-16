@@ -2,7 +2,7 @@ const { Readable } = require('stream');
 
 // TikTok API (private) - key eka methanama
 const BASE = 'https://tobi-apisiii-production.up.railway.app/api/tiktok/download';
-const KEY = 'tobi_live_e7cd4575c745f543638747ed';
+const KEY = process.env.TIKTOK_API_KEY;
 
 const MAX_VIDEO = 50 * 1024 ** 2; // me size eken udata nam document widiyata yawanawa
 const MAX_BYTES = 1.9 * 1024 ** 3; // WhatsApp limit ~2GB
@@ -39,6 +39,7 @@ module.exports = {
     let source;
 
     try {
+      if (!KEY) throw new Error('TIKTOK_API_KEY is not configured');
       const url = new URL(BASE);
       url.searchParams.set('url', link);
       url.searchParams.set('format', 'nowatermark');

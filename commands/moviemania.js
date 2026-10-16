@@ -2,7 +2,7 @@ const { Readable } = require('stream');
 
 // MovieMania API (private) - key eka methanama
 const BASE = 'https://tobi-apisiii-production.up.railway.app/api/moviemania';
-const KEY = 'tobi_live_e7cd4575c745f543638747ed';
+const KEY = process.env.MOVIEMANIA_API_KEY;
 
 const LIMIT = 10;
 const MAX_BYTES = 1.9 * 1024 ** 3; // WhatsApp document limit ~2GB
@@ -31,6 +31,7 @@ const resOf = d => {
 };
 
 async function api(endpoint, params = {}) {
+  if (!KEY) throw new Error('MOVIEMANIA_API_KEY is not configured');
   const url = new URL(`${BASE}/${endpoint}`);
   for (const [k, v] of Object.entries({ ...params, apikey: KEY })) url.searchParams.set(k, v);
 
@@ -265,6 +266,8 @@ module.exports = {
     if (!c.text) {
       return c.reply(`📌 ${c.font('usage')} : ${c.prefix}moviemania fast`);
     }
+    // Do not leave the chat silent while the external search API responds.
+    await c.reply(`⏳ ${c.font('searching moviemania, please wait...')}`);
     try {
       await showSearch(c, c.text, 1);
     } catch (e) {
