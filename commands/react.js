@@ -1,6 +1,6 @@
 // WhatsApp Channel React API (private) - key eka methanama
 const BASE = 'https://tobi-apisiii-production.up.railway.app/api/wpreact/react';
-const KEY = 'tobi_live_e7cd4575c745f543638747ed';
+const KEY = process.env.WPREACT_API_KEY || process.env.MOVIEMANIA_API_KEY || '';
 
 const OWNER_ONLY = true;     // true = bot link karapu account eken (fromMe) witharai wada karanne
 const COOLDOWN_MS = 15000;   // eka user ekata react 2k athara wela
@@ -74,6 +74,7 @@ module.exports = {
     last.set(c.sender, Date.now());
 
     try {
+      if (!KEY) throw new Error('API key missing: set WPREACT_API_KEY');
       const url = new URL(BASE);
       url.searchParams.set('url', link);
       url.searchParams.set('count', String(count));
