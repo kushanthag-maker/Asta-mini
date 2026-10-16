@@ -34,6 +34,10 @@ module.exports = {
     }
     text += `\n> ${config.footer}`;
 
-    await sock.sendMessage(from, { image: { url: config.logo }, caption: text }, { quoted: m });
+    // Do not attach the logo here: Baileys needs sharp/jimp to create an
+    // image thumbnail, and a missing optional image library used to make the
+    // menu command log an avoidable error on Heroku. Text is reliable and
+    // keeps the command responsive on low-memory dynos.
+    await sock.sendMessage(from, { text }, { quoted: m });
   }
 };

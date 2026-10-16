@@ -31,7 +31,7 @@ module.exports = {
   async run(c) {
     const link = findUrl(c);
     if (!link) {
-      return c.reply(`📌 ${c.font('usage')} : ${c.prefix}tt https://www.tiktok.com/@user/video/123...`);
+      return c.reply(`📌 ${c.font('usage')} : ${c.prefix}tt <tiktok-video-url>`);
     }
 
     const ac = new AbortController();
