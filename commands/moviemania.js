@@ -1,5 +1,4 @@
 const { Readable, Transform } = require('stream');
-const { spawn } = require('child_process');
 
 // MovieMania API (private) - key eka methanama
 const BASE = 'https://tobi-apisiii-production.up.railway.app/api/moviemania';
@@ -202,52 +201,11 @@ class ByteLimit extends Transform {
   _transform(chunk, encoding, callback) {
     this.total += chunk.length;
     if (this.total > this.limit) {
-      callback(new Error(`Converted MP4 exceeds ${fmtSize(this.limit)}`));
+      callback(new Error(`Movie stream exceeds ${fmtSize(this.limit)}`));
       return;
     }
     callback(null, chunk);
   }
-}
-
-// The provider returns Matroska in practice. Remux it to a fragmented MP4
-// over pipes so Baileys receives a real MP4 document without buffering the
-// complete movie in RAM or writing a temporary movie file to disk.
-function createMp4Stream(res) {
-  if (!res.body) throw new Error('Movie response has no body');
-
-  const input = Readable.fromWeb(res.body);
-  const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
-  const ffmpeg = spawn(ffmpegPath, [
-    '-hide_banner', '-loglevel', 'error',
-    '-i', 'pipe:0',
-    '-map', '0:v:0', '-map', '0:a:0?',
-    '-c', 'copy',
-    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
-    '-f', 'mp4', 'pipe:1'
-  ], { stdio: ['pipe', 'pipe', 'pipe'] });
-
-  let ffmpegError = '';
-  ffmpeg.stderr.on('data', chunk => {
-    ffmpegError = `${ffmpegError}${chunk}`.slice(-1000);
-  });
-
-  const output = ffmpeg.stdout.pipe(new ByteLimit(MAX_BYTES));
-  const cleanup = () => {
-    try { input.destroy(); } catch {}
-    try { ffmpeg.stdin.destroy(); } catch {}
-    try { if (!ffmpeg.killed) ffmpeg.kill('SIGKILL'); } catch {}
-  };
-
-  input.on('error', error => output.destroy(error));
-  ffmpeg.on('error', error => output.destroy(error));
-  ffmpeg.on('close', code => {
-    if (code !== 0 && !output.destroyed) {
-      output.destroy(new Error(`ffmpeg failed (${code}): ${ffmpegError.trim() || 'unknown error'}`));
-    }
-  });
-  output.on('error', cleanup);
-  input.pipe(ffmpeg.stdin);
-  return { stream: output, cleanup };
 }
 
 async function download(c, m, title, slot) {
@@ -267,11 +225,10 @@ async function download(c, m, title, slot) {
   busy.add(c.number);
   let opened;
   let source;
-  let streamCleanup;
   try {
     await c.reply(
       `⬇️ ${c.font('downloading')} *${slot.res}* ...\n` +
-      `${c.font('converting to mp4 and sending as a document, please wait')}`
+      `${c.font('streaming directly to whatsapp as a document, please wait')}`
     );
 
     const urls = [https(d.directDownloadUrl), d.url].filter((u, i, a) => u && a.indexOf(u) === i);
@@ -286,17 +243,24 @@ async function download(c, m, title, slot) {
       );
     }
 
-    const fileName = `${fileSafe(title)}${m.year ? ` (${m.year})` : ''} [${slot.res}].mp4`;
+    if (!res.body) throw new Error('Movie response has no body');
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    const isMkv = contentType.includes('matroska') || /\.mkv(?:\?|$)/i.test(d.url || '');
+    const ext = isMkv ? 'mkv' : 'mp4';
+    const mimetype = isMkv
+      ? 'video/x-matroska'
+      : (contentType.startsWith('video/') ? contentType.split(';')[0] : 'video/mp4');
+    const fileName = `${fileSafe(title)}${m.year ? ` (${m.year})` : ''} [${slot.res}].${ext}`;
 
-    const converted = createMp4Stream(res);
-    source = converted.stream;
-    streamCleanup = converted.cleanup;
+    // Direct web-stream -> Node stream -> Baileys document. Only the current
+    // network chunk is buffered; the complete movie is never held in RAM.
+    source = Readable.fromWeb(res.body).pipe(new ByteLimit(MAX_BYTES));
     log(`sending ${fileName} (${size ? fmtSize(size) : 'unknown size'})`);
     await c.sock.sendMessage(
       c.from,
       {
         document: { stream: source },
-        mimetype: 'video/mp4',
+        mimetype,
         fileName,
         caption: `🎬 ${title}${m.year ? ` (${m.year})` : ''}\n📺 ${slot.res}${size ? ` • ${fmtSize(size)}` : ''}\n\n> ${c.config.footer}`
       },
@@ -311,7 +275,6 @@ async function download(c, m, title, slot) {
     );
   } finally {
     try { source?.destroy(); } catch {}
-    try { streamCleanup?.(); } catch {}
     try { opened?.ac.abort(); } catch {}
     busy.delete(c.number);
   }
