@@ -1,12 +1,12 @@
 const { Readable } = require('stream');
 
-// MovieMania API ( tho ponna kariya meka gnna epa harida tho)
+// MovieMania API (private) - key eka methanama
 const BASE = 'https://tobi-apisiii-production.up.railway.app/api/moviemania';
-const KEY = process.env.MOVIEMANIA_API_KEY || '';
+const KEY = 'tobi_live_e7cd4575c745f543638747ed';
 
 const LIMIT = 10;
-const MAX_BYTES = 1.9 * 1024 ** 3; // WhatsApp document limit ~2GB (meke 2gb limite ekk dala tiynne)
-const busy = new Set(); // number -> eka welawata download ekak ( oken wennw number rwply seen eka)
+const MAX_BYTES = 1.9 * 1024 ** 3; // WhatsApp document limit ~2GB
+const busy = new Set(); // number -> eka welawata download ekak witharai
 
 const https = u => (u || '').replace(/^http:\/\//i, 'https://');
 const clean = s => String(s || '').replace(/apikey=[^&\s]+/gi, 'apikey=***'); // key leak wenna epa
@@ -23,7 +23,6 @@ function sizeToBytes(s) {
 }
 
 async function api(endpoint, params = {}) {
-  if (!KEY) throw new Error('API key missing: set the required API key in environment variables');
   const url = new URL(`${BASE}/${endpoint}`);
   for (const [k, v] of Object.entries({ ...params, apikey: KEY })) url.searchParams.set(k, v);
 
@@ -137,7 +136,7 @@ async function showInfo(c, item) {
 }
 
 // ---------- 3) DOWNLOAD (stream -> WhatsApp mp4 document) ----------
-// URLs list eken mulinma wada karana eka open karanawa
+// URLs list eken mulinma wada karana eka open karanawa (body eka read karanne na)
 async function openFirst(urls) {
   const errors = [];
   for (const u of urls) {
