@@ -1,13 +1,14 @@
-const { Readable, Transform } = require('stream');
+const { Readable } = require('stream');
 
 // MovieMania API (private) - key eka methanama
 const BASE = 'https://tobi-apisiii-production.up.railway.app/api/moviemania';
-// MovieMania API key for the owner's private API service.
 const KEY = 'tobi_live_e7cd4575c745f543638747ed';
 
 const LIMIT = 10;
 const MAX_BYTES = 1.9 * 1024 ** 3; // WhatsApp document limit ~2GB
-const MAX_BUFFER_BYTES = 512 * 1024 ** 2; // safety cap for fallback only
+const MAX_BUFFER_BYTES = 64 * 1024 ** 2; // buffer fallback eka podi files walata witharai (dyno RAM 512MB)
+const PROBE_TIMEOUT_MS = Number(process.env.MM_PROBE_TIMEOUT_MS) || 30000;
+const SEND_TIMEOUT_MS = 45 * 60 * 1000; // eka movie ekak yawanna adhika wasayen minutes 45
 const RESOLUTIONS = [480, 720, 1080]; // hama movie ekatama me 3 slots penawanawa
 const busy = new Set(); // number -> eka welawata download ekak witharai
 
@@ -166,122 +167,78 @@ async function showInfo(c, item) {
   });
 }
 
-// ---------- 3) DOWNLOAD (stream -> WhatsApp mp4 document) ----------
-// URLs list eken mulinma wada karana eka open karanawa (body eka read karanne na)
-async function openFirst(urls) {
+// ---------- 3) DOWNLOAD (Baileys url-stream -> stream -> small buffer) ----------
+// URL eka wada karanawada kiyala headers witharak balanawa (Range: bytes=0-0, body eka read karanne na).
+// Timeout ekak thiyenawa, so hang wela busy lock eka stuck wenne na.
+async function probe(u) {
+  const attempt = async withRange => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), PROBE_TIMEOUT_MS);
+    try {
+      const res = await fetch(u, { headers: withRange ? { Range: 'bytes=0-0' } : {}, signal: ac.signal, redirect: 'follow' });
+      const type = (res.headers.get('content-type') || '').toLowerCase();
+      const range = res.headers.get('content-range'); // "bytes 0-0/858000000"
+      const size = range ? Number(range.split('/')[1]) || 0 : (res.status === 206 ? 0 : Number(res.headers.get('content-length') || 0));
+      try { await res.body?.cancel(); } catch {}
+      return { status: res.status, ok: res.ok, type, size };
+    } finally {
+      clearTimeout(timer);
+      ac.abort();
+    }
+  };
+
+  let r = await attempt(true);
+  if (!r.ok && [400, 403, 405, 416, 501].includes(r.status)) r = await attempt(false); // Range support nathi server walata
+  log(`probe ${clean(u).slice(0, 90)} -> ${r.status} ${r.type} ${r.size || '?'} bytes`);
+
+  const notMedia = r.type.includes('json') || r.type.includes('html') || r.type.startsWith('text/');
+  const tooSmall = r.size > 0 && r.size < 1024 * 1024; // 1MB walata adu = movie ekak nemei (wrapper page ekak)
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (notMedia) throw new Error(`not a video (${r.type || 'unknown type'})`);
+  if (tooSmall) throw new Error(`too small to be a movie (${r.size} bytes)`);
+  return { url: u, size: r.size, type: r.type };
+}
+
+// real file URL eka (quota use wenne na) mulin, API URL eka passe
+async function pickSource(urls) {
   const errors = [];
   for (const u of urls) {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 60000); // headers enakan witharai timeout
     try {
-      const res = await fetch(u, { signal: ac.signal, redirect: 'follow' });
-      clearTimeout(timer);
-      const type = (res.headers.get('content-type') || '').toLowerCase();
-      log(`open ${clean(u).slice(0, 80)} -> ${res.status} ${type} ${res.headers.get('content-length') || '?'} bytes`);
-      if (res.ok && res.body && !type.includes('json') && !type.includes('html') && !type.startsWith('text/')) {
-        const reader = res.body.getReader();
-        const first = await reader.read();
-        const prefix = first.value ? Buffer.from(first.value) : Buffer.alloc(0);
-        const sample = prefix.toString('utf8', 0, Math.min(prefix.length, 512)).trimStart().toLowerCase();
-        const looksHtml = sample.startsWith('<!doctype html') || sample.startsWith('<html') || sample.startsWith('<head') || sample.includes('<meta');
-        if (!looksHtml) {
-          const stream = Readable.from((async function* () {
-            if (prefix.length) yield prefix;
-            while (true) {
-              const next = await reader.read();
-              if (next.done) break;
-              if (next.value) yield Buffer.from(next.value);
-            }
-          })(), { highWaterMark: 4 * 1024 * 1024 });
-          return { res, ac, url: u, stream };
-        }
-        try { await reader.cancel(); } catch {}
-        errors.push(`${res.status} HTML response returned instead of media`);
-        ac.abort();
-        continue;
-      }
-
-      const body = await res.text().catch(() => '');
-      errors.push(`${res.status} ${body.replace(/\s+/g, ' ').slice(0, 150)}`);
-      ac.abort();
+      return await probe(u);
     } catch (e) {
-      clearTimeout(timer);
-      errors.push(e.message);
+      errors.push(`${clean(u).slice(0, 60)} -> ${e.name === 'AbortError' ? 'timeout' : e.message}`);
     }
   }
   throw new Error(errors.join(' | '));
 }
 
+// RAM ekata ganna puluwan podi files walata witharai (limit eka watunama nawaththanawa)
 async function readLimitedBuffer(url, limit) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(180000), redirect: 'follow' });
-  if (!res.ok || !res.body) throw new Error(`buffer HTTP ${res.status}`);
-  const declared = Number(res.headers.get('content-length') || 0);
-  if (declared > limit) throw new Error(`buffer fallback exceeds ${fmtSize(limit)}`);
-  const reader = res.body.getReader();
-  const chunks = [];
-  let total = 0;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 180000);
   try {
+    const res = await fetch(url, { signal: ac.signal, redirect: 'follow' });
+    if (!res.ok || !res.body) throw new Error(`buffer HTTP ${res.status}`);
+    if (Number(res.headers.get('content-length') || 0) > limit) throw new Error(`too big for buffer (${fmtSize(limit)} limit)`);
+    const reader = res.body.getReader();
+    const chunks = [];
+    let total = 0;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > limit) throw new Error(`buffer fallback exceeds ${fmtSize(limit)}`);
+      if (total > limit) throw new Error(`too big for buffer (${fmtSize(limit)} limit)`);
       chunks.push(Buffer.from(value));
     }
+    return Buffer.concat(chunks);
   } finally {
-    try { reader.releaseLock(); } catch {}
-  }
-  const buffer = Buffer.concat(chunks);
-  const sample = buffer.toString('utf8', 0, Math.min(buffer.length, 512)).trimStart().toLowerCase();
-  if (sample.startsWith('<!doctype html') || sample.startsWith('<html') || sample.startsWith('<head') || sample.includes('<meta')) {
-    throw new Error('source returned an HTML page instead of a video file');
-  }
-  return { buffer, contentType: res.headers.get('content-type') || '' };
-}
-
-class ByteLimit extends Transform {
-  constructor(limit) {
-    super({ highWaterMark: 4 * 1024 * 1024 });
-    this.limit = limit;
-    this.total = 0;
-  }
-
-  _transform(chunk, encoding, callback) {
-    this.total += chunk.length;
-    if (this.total > this.limit) {
-      callback(new Error(`Movie stream exceeds ${fmtSize(this.limit)}`));
-      return;
-    }
-    callback(null, chunk);
+    clearTimeout(timer);
+    ac.abort();
   }
 }
 
-class ProgressTransform extends Transform {
-  constructor(total, onProgress) {
-    super({ highWaterMark: 4 * 1024 * 1024 });
-    this.total = total || 0;
-    this.onProgress = onProgress;
-    this.bytes = 0;
-    this.lastUpdate = 0;
-  }
-
-  _transform(chunk, encoding, callback) {
-    this.bytes += chunk.length;
-    const now = Date.now();
-    if (now - this.lastUpdate >= 15000 || (this.total && this.bytes >= this.total)) {
-      this.lastUpdate = now;
-      try { this.onProgress(this.bytes, this.total); } catch {}
-    }
-    callback(null, chunk);
-  }
-}
-
-function progressBar(done, total) {
-  if (!total) return '⬆️ Uploading ' + '•'.repeat(10);
-  const pct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
-  const filled = Math.round(pct / 10);
-  return `${'█'.repeat(filled)}${'░'.repeat(10 - filled)} ${pct}%`;
-}
+const withTimeout = (p, ms) =>
+  Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('send timed out'), { sendTimeout: true })), ms).unref?.())]);
 
 async function download(c, m, title, slot) {
   if (busy.has(c.number)) {
@@ -298,23 +255,19 @@ async function download(c, m, title, slot) {
   }
 
   busy.add(c.number);
-  let opened;
+  const errors = [];
   let source;
-  let progressMsg;
-  let progressTimer;
   try {
-    progressMsg = await c.reply(
-      `⬇️ ${c.font('downloading')} *${slot.res}* ...\n` +
-      `${c.font('streaming directly to whatsapp as a document, please wait')}`
+    await c.reply(
+      `⬇️ ${c.font('downloading')} *${slot.res}*${d.size ? ` (${d.size})` : ''} ...\n` +
+      `${c.font('sending as a document, big files take a few minutes, please wait')}`
     );
 
-    // MovieMania returns `url` as the real cloud file and
-    // `directDownloadUrl` as an API/HTML wrapper. Try the real file first.
+    // 1) URL eka select karanawa. d.url = real file (API quota use wenne na), directDownloadUrl = API (quota 1k yanawa)
     const urls = [https(d.url), https(d.directDownloadUrl)].filter((u, i, a) => u && a.indexOf(u) === i);
-    opened = await openFirst(urls);
-    const { res } = opened;
+    const src = await pickSource(urls);
 
-    const size = Number(res.headers.get('content-length') || 0) || declared;
+    const size = src.size || declared;
     if (size > MAX_BYTES) {
       return c.reply(
         `❌ ${c.font('file is too big for whatsapp')} (${fmtSize(size)})\n` +
@@ -322,78 +275,69 @@ async function download(c, m, title, slot) {
       );
     }
 
-    if (!res.body || !opened.stream) throw new Error('Movie response is not a valid media stream');
-    const contentType = (res.headers.get('content-type') || '').toLowerCase();
-    const selectedUrl = opened.url;
-    const isMkv = contentType.includes('matroska') || /\.mkv(?:\?|$)/i.test(selectedUrl || d.url || '');
+    const isMkv = src.type.includes('matroska') || /\.mkv(?:\?|$)/i.test(src.url);
     const ext = isMkv ? 'mkv' : 'mp4';
-    const mimetype = isMkv
-      ? 'video/x-matroska'
-      : (contentType.startsWith('video/') ? contentType.split(';')[0] : 'video/mp4');
+    const mimetype = isMkv ? 'video/x-matroska' : (src.type.startsWith('video/') ? src.type.split(';')[0] : 'video/mp4');
     const fileName = `${fileSafe(title)}${m.year ? ` (${m.year})` : ''} [${slot.res}].${ext}`;
-
     const caption = `🎬 ${title}${m.year ? ` (${m.year})` : ''}\n📺 ${slot.res}${size ? ` • ${fmtSize(size)}` : ''}\n\n> ${c.config.footer}`;
-    // openFirst may skip the API download endpoint when it returns HTML and
-    // select the real file URL from the API's `url` field. Always send the
-    // URL that was actually validated, never urls[0].
-    const targetUrl = selectedUrl;
-    log(`sending ${fileName} (${size ? fmtSize(size) : 'unknown size'})`);
+    const msgOpts = { quoted: c.m };
+    log(`sending ${fileName} (${size ? fmtSize(size) : 'unknown size'}) from ${clean(src.url).slice(0, 70)}`);
 
-    const updateProgress = async (done, total) => {
-      if (!progressMsg?.key) return;
-      const label = total ? `${fmtSize(done)} / ${fmtSize(total)}` : fmtSize(done);
-      await c.sock.sendMessage(c.from, {
-        text: `⬆️ ${c.font('uploading')} *${slot.res}*\n${progressBar(done, total)}\n📦 ${label}`,
-        edit: progressMsg.key,
-      }).catch(() => {});
-    };
-    await updateProgress(0, size);
-
-    // Match Dark Queen's proven path: after validating the URL once, let
-    // Baileys fetch and upload the URL directly. This avoids the custom
-    // Node Readable pipeline that can stall during long WhatsApp uploads.
-    const sendDirect = async () => {
-      if (progressTimer) clearInterval(progressTimer);
-      progressTimer = setInterval(() => updateProgress(0, 0), 30000);
-      await c.sock.sendMessage(c.from, {
-        document: { url: targetUrl }, mimetype, fileName, caption,
-      }, { quoted: c.m });
-    };
-
+    // A) Baileys eka URL eken ama STREAM karanawa (Dark Queen widiyata) - RAM use wenne na
     try {
-      try { opened?.ac.abort(); } catch {}
-      await sendDirect();
-    } catch (streamError) {
-      log(`direct URL send failed: ${clean(streamError.message)}`);
-      // Same as Dark Queen: retry the direct URL once, then use a bounded
-      // in-memory fallback only for small files. Large files must not consume
-      // the dyno's RAM while trying to recover.
-      try {
-        await sendDirect();
-      } catch (retryError) {
-        log(`direct URL retry failed: ${clean(retryError.message)}`);
-        if (size && size > MAX_BUFFER_BYTES) throw retryError;
-        const buffered = await readLimitedBuffer(targetUrl, MAX_BUFFER_BYTES);
-        await c.sock.sendMessage(c.from, {
-          document: buffered.buffer,
-          mimetype: buffered.contentType.startsWith('video/') ? buffered.contentType.split(';')[0] : mimetype,
-          fileName,
-          caption,
-        }, { quoted: c.m });
-      }
+      log('A: baileys url stream');
+      await withTimeout(c.sock.sendMessage(c.from, { document: { url: src.url }, mimetype, fileName, caption }, msgOpts), SEND_TIMEOUT_MS);
+      log('sent OK (A)');
+      return;
+    } catch (e) {
+      errors.push(`A: ${clean(e.message)}`);
+      log('A failed:', clean(e.message));
+      if (e.sendTimeout) throw e; // still uploading wenna puluwan - double send karanna epa
     }
-    await updateProgress(size || 0, size || 0);
-    log('sent OK');
+
+    // B) apima fetch karala stream ekak widiyata Baileys ekata denawa
+    try {
+      log('B: fetch -> stream');
+      const ac = new AbortController();
+      const res = await fetch(src.url, { signal: ac.signal, redirect: 'follow' });
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+      source = Readable.fromWeb(res.body);
+      await withTimeout(c.sock.sendMessage(c.from, { document: { stream: source }, mimetype, fileName, caption }, msgOpts), SEND_TIMEOUT_MS);
+      log('sent OK (B)');
+      return;
+    } catch (e) {
+      errors.push(`B: ${clean(e.message)}`);
+      log('B failed:', clean(e.message));
+      try { source?.destroy(); } catch {}
+      if (e.sendTimeout) throw e;
+    }
+
+    // C) buffer - podi files (<= 64MB) witharai. Loku ewa RAM eka naswanawa nisa skip karanawa.
+    if (!size || size <= MAX_BUFFER_BYTES) {
+      try {
+        log('C: buffer fallback');
+        const buffer = await readLimitedBuffer(src.url, MAX_BUFFER_BYTES);
+        await c.sock.sendMessage(c.from, { document: buffer, mimetype, fileName, caption }, msgOpts);
+        log('sent OK (C)');
+        return;
+      } catch (e) {
+        errors.push(`C: ${clean(e.message)}`);
+        log('C failed:', clean(e.message));
+      }
+    } else {
+      errors.push(`C: skipped (file ${fmtSize(size)} > buffer limit ${fmtSize(MAX_BUFFER_BYTES)})`);
+    }
+
+    throw new Error(errors.join(' | '));
   } catch (e) {
     console.error('[mm] download error:', clean(e.stack || e.message));
+    const link = d.url && /^https?:\/\//i.test(d.url) ? `\n\n💡 ${c.font('direct link')} :\n${d.url}` : '';
     await c.reply(
-      `❌ ${c.font('download failed')}\n${clean(e.message).slice(0, 300)}\n\n` +
-      `${c.font('try a lower quality')}`
-    );
+      `❌ ${c.font('download failed')}\n${clean(e.message).slice(0, 400)}\n\n` +
+      `${c.font('try a lower quality')}${link}`
+    ).catch(() => {});
   } finally {
-    if (progressTimer) clearInterval(progressTimer);
     try { source?.destroy(); } catch {}
-    try { opened?.ac.abort(); } catch {}
     busy.delete(c.number);
   }
 }
@@ -407,8 +351,6 @@ module.exports = {
     if (!c.text) {
       return c.reply(`📌 ${c.font('usage')} : ${c.prefix}moviemania fast`);
     }
-    // Do not leave the chat silent while the external search API responds.
-    await c.reply(`⏳ ${c.font('searching moviemania, please wait...')}`);
     try {
       await showSearch(c, c.text, 1);
     } catch (e) {
