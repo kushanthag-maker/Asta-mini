@@ -179,7 +179,7 @@ async function openFirst(urls) {
       const type = (res.headers.get('content-type') || '').toLowerCase();
       const isFile = res.ok && res.body && !type.includes('json') && !type.includes('html') && !type.startsWith('text/');
       log(`open ${clean(u).slice(0, 80)} -> ${res.status} ${type} ${res.headers.get('content-length') || '?'} bytes`);
-      if (isFile) return { res, ac };
+      if (isFile) return { res, ac, url: u };
 
       const body = await res.text().catch(() => '');
       errors.push(`${res.status} ${body.replace(/\s+/g, ' ').slice(0, 150)}`);
@@ -254,7 +254,9 @@ async function download(c, m, title, slot) {
       `${c.font('streaming directly to whatsapp as a document, please wait')}`
     );
 
-    const urls = [https(d.directDownloadUrl), d.url].filter((u, i, a) => u && a.indexOf(u) === i);
+    // MovieMania returns `url` as the real cloud file and
+    // `directDownloadUrl` as an API/HTML wrapper. Try the real file first.
+    const urls = [https(d.url), https(d.directDownloadUrl)].filter((u, i, a) => u && a.indexOf(u) === i);
     opened = await openFirst(urls);
     const { res } = opened;
 
@@ -268,7 +270,8 @@ async function download(c, m, title, slot) {
 
     if (!res.body) throw new Error('Movie response has no body');
     const contentType = (res.headers.get('content-type') || '').toLowerCase();
-    const isMkv = contentType.includes('matroska') || /\.mkv(?:\?|$)/i.test(d.url || '');
+    const selectedUrl = opened.url;
+    const isMkv = contentType.includes('matroska') || /\.mkv(?:\?|$)/i.test(selectedUrl || d.url || '');
     const ext = isMkv ? 'mkv' : 'mp4';
     const mimetype = isMkv
       ? 'video/x-matroska'
@@ -276,7 +279,10 @@ async function download(c, m, title, slot) {
     const fileName = `${fileSafe(title)}${m.year ? ` (${m.year})` : ''} [${slot.res}].${ext}`;
 
     const caption = `🎬 ${title}${m.year ? ` (${m.year})` : ''}\n📺 ${slot.res}${size ? ` • ${fmtSize(size)}` : ''}\n\n> ${c.config.footer}`;
-    const targetUrl = urls[0];
+    // openFirst may skip the API download endpoint when it returns HTML and
+    // select the real file URL from the API's `url` field. Always send the
+    // URL that was actually validated, never urls[0].
+    const targetUrl = selectedUrl;
     log(`sending ${fileName} (${size ? fmtSize(size) : 'unknown size'})`);
 
     // Same first path as Dark Queen/Cinesubz: let Baileys stream the remote
