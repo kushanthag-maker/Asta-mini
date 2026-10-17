@@ -7,6 +7,7 @@ const KEY = 'tobi_live_e7cd4575c745f543638747ed';
 
 const LIMIT = 10;
 const MAX_BYTES = 1.9 * 1024 ** 3; // WhatsApp document limit ~2GB
+const MAX_BUFFER_BYTES = 512 * 1024 ** 2; // safety cap for fallback only
 const RESOLUTIONS = [480, 720, 1080]; // hama movie ekatama me 3 slots penawanawa
 const busy = new Set(); // number -> eka welawata download ekak witharai
 
@@ -191,6 +192,28 @@ async function openFirst(urls) {
   throw new Error(errors.join(' | '));
 }
 
+async function readLimitedBuffer(url, limit) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(180000), redirect: 'follow' });
+  if (!res.ok || !res.body) throw new Error(`buffer HTTP ${res.status}`);
+  const declared = Number(res.headers.get('content-length') || 0);
+  if (declared > limit) throw new Error(`buffer fallback exceeds ${fmtSize(limit)}`);
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) throw new Error(`buffer fallback exceeds ${fmtSize(limit)}`);
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  return { buffer: Buffer.concat(chunks), contentType: res.headers.get('content-type') || '' };
+}
+
 class ByteLimit extends Transform {
   constructor(limit) {
     super();
@@ -252,20 +275,37 @@ async function download(c, m, title, slot) {
       : (contentType.startsWith('video/') ? contentType.split(';')[0] : 'video/mp4');
     const fileName = `${fileSafe(title)}${m.year ? ` (${m.year})` : ''} [${slot.res}].${ext}`;
 
-    // Direct web-stream -> Node stream -> Baileys document. Only the current
-    // network chunk is buffered; the complete movie is never held in RAM.
-    source = Readable.fromWeb(res.body).pipe(new ByteLimit(MAX_BYTES));
+    const caption = `🎬 ${title}${m.year ? ` (${m.year})` : ''}\n📺 ${slot.res}${size ? ` • ${fmtSize(size)}` : ''}\n\n> ${c.config.footer}`;
+    const targetUrl = urls[0];
     log(`sending ${fileName} (${size ? fmtSize(size) : 'unknown size'})`);
-    await c.sock.sendMessage(
-      c.from,
-      {
-        document: { stream: source },
-        mimetype,
-        fileName,
-        caption: `🎬 ${title}${m.year ? ` (${m.year})` : ''}\n📺 ${slot.res}${size ? ` • ${fmtSize(size)}` : ''}\n\n> ${c.config.footer}`
-      },
-      { quoted: c.m }
-    );
+
+    // Same first path as Dark Queen/Cinesubz: let Baileys stream the remote
+    // URL directly, so the whole movie is not loaded into Heroku RAM.
+    try {
+      await c.sock.sendMessage(c.from, {
+        document: { url: targetUrl }, mimetype, fileName, caption,
+      }, { quoted: c.m });
+    } catch (urlError) {
+      log(`direct URL send failed: ${clean(urlError.message)}`);
+      // Second path: pipe the response body without buffering the complete
+      // file, useful when Baileys rejects a remote URL source.
+      try {
+        source = Readable.fromWeb(res.body).pipe(new ByteLimit(MAX_BYTES));
+        await c.sock.sendMessage(c.from, {
+          document: { stream: source }, mimetype, fileName, caption,
+        }, { quoted: c.m });
+      } catch (streamError) {
+        log(`stream send failed: ${clean(streamError.message)}`);
+        if (size && size > MAX_BUFFER_BYTES) throw streamError;
+        const buffered = await readLimitedBuffer(targetUrl, MAX_BUFFER_BYTES);
+        await c.sock.sendMessage(c.from, {
+          document: buffered.buffer,
+          mimetype: buffered.contentType.startsWith('video/') ? buffered.contentType.split(';')[0] : mimetype,
+          fileName,
+          caption,
+        }, { quoted: c.m });
+      }
+    }
     log('sent OK');
   } catch (e) {
     console.error('[mm] download error:', clean(e.stack || e.message));

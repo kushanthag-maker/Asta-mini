@@ -34,10 +34,17 @@ module.exports = {
     }
     text += `\n> ${config.footer}`;
 
-    // Do not attach the logo here: Baileys needs sharp/jimp to create an
-    // image thumbnail, and a missing optional image library used to make the
-    // menu command log an avoidable error on Heroku. Text is reliable and
-    // keeps the command responsive on low-memory dynos.
-    await sock.sendMessage(from, { text }, { quoted: m });
+    // Send the logo like Dark Queen's menu, but keep a text fallback so a
+    // temporary image/CDN failure never breaks the menu command.
+    try {
+      if (!config.logo || !/^https?:\/\//i.test(config.logo)) throw new Error('invalid menu logo URL');
+      await sock.sendMessage(from, {
+        image: { url: config.logo },
+        caption: text,
+      }, { quoted: m });
+    } catch (e) {
+      console.error('[menu] image failed, using text fallback:', e.message);
+      await sock.sendMessage(from, { text }, { quoted: m });
+    }
   }
 };
