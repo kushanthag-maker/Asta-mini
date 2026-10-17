@@ -349,34 +349,40 @@ async function download(c, m, title, slot) {
     };
     await updateProgress(0, size);
 
-    // Stream the already validated response body. We intentionally do not
-    // pass { url } to Baileys because this API can return an HTML challenge
-    // with a forged video/mp4 content-type on a second request.
-    const sendStream = async (attempt) => {
-      try { source?.destroy(); } catch {}
+    // Match Dark Queen's proven path: after validating the URL once, let
+    // Baileys fetch and upload the URL directly. This avoids the custom
+    // Node Readable pipeline that can stall during long WhatsApp uploads.
+    const sendDirect = async () => {
       if (progressTimer) clearInterval(progressTimer);
-      source = attempt.stream
-        .pipe(new ByteLimit(MAX_BYTES))
-        .pipe(new ProgressTransform(size, (done, total) => { updateProgress(done, total); }));
-      progressTimer = setInterval(() => updateProgress(source?.bytes || 0, size), 30000);
+      progressTimer = setInterval(() => updateProgress(0, 0), 30000);
       await c.sock.sendMessage(c.from, {
-        document: { stream: source }, mimetype, fileName, caption,
+        document: { url: targetUrl }, mimetype, fileName, caption,
       }, { quoted: c.m });
-      await updateProgress(size || 0, size || 0);
     };
 
     try {
-      await sendStream(opened);
-    } catch (streamError) {
-      log(`stream send failed, reopening source once: ${clean(streamError.message)}`);
-      try { source?.destroy(); } catch {}
       try { opened?.ac.abort(); } catch {}
-      await updateProgress(0, size);
-      // Baileys has no resumable chunk API. A reconnect can only be handled
-      // by reopening the validated source and retrying the complete document.
-      opened = await openFirst(urls);
-      await sendStream(opened);
+      await sendDirect();
+    } catch (streamError) {
+      log(`direct URL send failed: ${clean(streamError.message)}`);
+      // Same as Dark Queen: retry the direct URL once, then use a bounded
+      // in-memory fallback only for small files. Large files must not consume
+      // the dyno's RAM while trying to recover.
+      try {
+        await sendDirect();
+      } catch (retryError) {
+        log(`direct URL retry failed: ${clean(retryError.message)}`);
+        if (size && size > MAX_BUFFER_BYTES) throw retryError;
+        const buffered = await readLimitedBuffer(targetUrl, MAX_BUFFER_BYTES);
+        await c.sock.sendMessage(c.from, {
+          document: buffered.buffer,
+          mimetype: buffered.contentType.startsWith('video/') ? buffered.contentType.split(';')[0] : mimetype,
+          fileName,
+          caption,
+        }, { quoted: c.m });
+      }
     }
+    await updateProgress(size || 0, size || 0);
     log('sent OK');
   } catch (e) {
     console.error('[mm] download error:', clean(e.stack || e.message));
