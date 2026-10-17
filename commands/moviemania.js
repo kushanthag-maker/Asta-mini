@@ -256,6 +256,33 @@ class ByteLimit extends Transform {
   }
 }
 
+class ProgressTransform extends Transform {
+  constructor(total, onProgress) {
+    super();
+    this.total = total || 0;
+    this.onProgress = onProgress;
+    this.bytes = 0;
+    this.lastUpdate = 0;
+  }
+
+  _transform(chunk, encoding, callback) {
+    this.bytes += chunk.length;
+    const now = Date.now();
+    if (now - this.lastUpdate >= 15000 || (this.total && this.bytes >= this.total)) {
+      this.lastUpdate = now;
+      try { this.onProgress(this.bytes, this.total); } catch {}
+    }
+    callback(null, chunk);
+  }
+}
+
+function progressBar(done, total) {
+  if (!total) return '⬆️ Uploading ' + '•'.repeat(10);
+  const pct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+  const filled = Math.round(pct / 10);
+  return `${'█'.repeat(filled)}${'░'.repeat(10 - filled)} ${pct}%`;
+}
+
 async function download(c, m, title, slot) {
   if (busy.has(c.number)) {
     return c.reply(`⏳ ${c.font('another download is running, please wait')}`);
@@ -273,8 +300,10 @@ async function download(c, m, title, slot) {
   busy.add(c.number);
   let opened;
   let source;
+  let progressMsg;
+  let progressTimer;
   try {
-    await c.reply(
+    progressMsg = await c.reply(
       `⬇️ ${c.font('downloading')} *${slot.res}* ...\n` +
       `${c.font('streaming directly to whatsapp as a document, please wait')}`
     );
@@ -310,14 +339,28 @@ async function download(c, m, title, slot) {
     const targetUrl = selectedUrl;
     log(`sending ${fileName} (${size ? fmtSize(size) : 'unknown size'})`);
 
+    const updateProgress = async (done, total) => {
+      if (!progressMsg?.key) return;
+      const label = total ? `${fmtSize(done)} / ${fmtSize(total)}` : fmtSize(done);
+      await c.sock.sendMessage(c.from, {
+        text: `⬆️ ${c.font('uploading')} *${slot.res}*\n${progressBar(done, total)}\n📦 ${label}`,
+        edit: progressMsg.key,
+      }).catch(() => {});
+    };
+    await updateProgress(0, size);
+
     // Stream the already validated response body. We intentionally do not
     // pass { url } to Baileys because this API can return an HTML challenge
     // with a forged video/mp4 content-type on a second request.
     try {
-      source = opened.stream.pipe(new ByteLimit(MAX_BYTES));
+      source = opened.stream
+        .pipe(new ByteLimit(MAX_BYTES))
+        .pipe(new ProgressTransform(size, (done, total) => { updateProgress(done, total); }));
+      progressTimer = setInterval(() => updateProgress(source.bytes || 0, size), 30000);
       await c.sock.sendMessage(c.from, {
         document: { stream: source }, mimetype, fileName, caption,
       }, { quoted: c.m });
+      await updateProgress(size || 0, size || 0);
     } catch (streamError) {
       log(`stream send failed: ${clean(streamError.message)}`);
       if (size && size > MAX_BUFFER_BYTES) throw streamError;
@@ -337,6 +380,7 @@ async function download(c, m, title, slot) {
       `${c.font('try a lower quality')}`
     );
   } finally {
+    if (progressTimer) clearInterval(progressTimer);
     try { source?.destroy(); } catch {}
     try { opened?.ac.abort(); } catch {}
     busy.delete(c.number);
