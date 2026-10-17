@@ -192,7 +192,7 @@ async function openFirst(urls) {
               if (next.done) break;
               if (next.value) yield Buffer.from(next.value);
             }
-          })());
+          })(), { highWaterMark: 4 * 1024 * 1024 });
           return { res, ac, url: u, stream };
         }
         try { await reader.cancel(); } catch {}
@@ -241,7 +241,7 @@ async function readLimitedBuffer(url, limit) {
 
 class ByteLimit extends Transform {
   constructor(limit) {
-    super();
+    super({ highWaterMark: 4 * 1024 * 1024 });
     this.limit = limit;
     this.total = 0;
   }
@@ -258,7 +258,7 @@ class ByteLimit extends Transform {
 
 class ProgressTransform extends Transform {
   constructor(total, onProgress) {
-    super();
+    super({ highWaterMark: 4 * 1024 * 1024 });
     this.total = total || 0;
     this.onProgress = onProgress;
     this.bytes = 0;
@@ -352,25 +352,30 @@ async function download(c, m, title, slot) {
     // Stream the already validated response body. We intentionally do not
     // pass { url } to Baileys because this API can return an HTML challenge
     // with a forged video/mp4 content-type on a second request.
-    try {
-      source = opened.stream
+    const sendStream = async (attempt) => {
+      try { source?.destroy(); } catch {}
+      if (progressTimer) clearInterval(progressTimer);
+      source = attempt.stream
         .pipe(new ByteLimit(MAX_BYTES))
         .pipe(new ProgressTransform(size, (done, total) => { updateProgress(done, total); }));
-      progressTimer = setInterval(() => updateProgress(source.bytes || 0, size), 30000);
+      progressTimer = setInterval(() => updateProgress(source?.bytes || 0, size), 30000);
       await c.sock.sendMessage(c.from, {
         document: { stream: source }, mimetype, fileName, caption,
       }, { quoted: c.m });
       await updateProgress(size || 0, size || 0);
+    };
+
+    try {
+      await sendStream(opened);
     } catch (streamError) {
-      log(`stream send failed: ${clean(streamError.message)}`);
-      if (size && size > MAX_BUFFER_BYTES) throw streamError;
-      const buffered = await readLimitedBuffer(targetUrl, MAX_BUFFER_BYTES);
-      await c.sock.sendMessage(c.from, {
-        document: buffered.buffer,
-        mimetype: buffered.contentType.startsWith('video/') ? buffered.contentType.split(';')[0] : mimetype,
-        fileName,
-        caption,
-      }, { quoted: c.m });
+      log(`stream send failed, reopening source once: ${clean(streamError.message)}`);
+      try { source?.destroy(); } catch {}
+      try { opened?.ac.abort(); } catch {}
+      await updateProgress(0, size);
+      // Baileys has no resumable chunk API. A reconnect can only be handled
+      // by reopening the validated source and retrying the complete document.
+      opened = await openFirst(urls);
+      await sendStream(opened);
     }
     log('sent OK');
   } catch (e) {
