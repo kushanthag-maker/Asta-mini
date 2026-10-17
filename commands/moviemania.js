@@ -177,9 +177,29 @@ async function openFirst(urls) {
       const res = await fetch(u, { signal: ac.signal, redirect: 'follow' });
       clearTimeout(timer);
       const type = (res.headers.get('content-type') || '').toLowerCase();
-      const isFile = res.ok && res.body && !type.includes('json') && !type.includes('html') && !type.startsWith('text/');
       log(`open ${clean(u).slice(0, 80)} -> ${res.status} ${type} ${res.headers.get('content-length') || '?'} bytes`);
-      if (isFile) return { res, ac, url: u };
+      if (res.ok && res.body && !type.includes('json') && !type.includes('html') && !type.startsWith('text/')) {
+        const reader = res.body.getReader();
+        const first = await reader.read();
+        const prefix = first.value ? Buffer.from(first.value) : Buffer.alloc(0);
+        const sample = prefix.toString('utf8', 0, Math.min(prefix.length, 512)).trimStart().toLowerCase();
+        const looksHtml = sample.startsWith('<!doctype html') || sample.startsWith('<html') || sample.startsWith('<head') || sample.includes('<meta');
+        if (!looksHtml) {
+          const stream = Readable.from((async function* () {
+            if (prefix.length) yield prefix;
+            while (true) {
+              const next = await reader.read();
+              if (next.done) break;
+              if (next.value) yield Buffer.from(next.value);
+            }
+          })());
+          return { res, ac, url: u, stream };
+        }
+        try { await reader.cancel(); } catch {}
+        errors.push(`${res.status} HTML response returned instead of media`);
+        ac.abort();
+        continue;
+      }
 
       const body = await res.text().catch(() => '');
       errors.push(`${res.status} ${body.replace(/\s+/g, ' ').slice(0, 150)}`);
@@ -211,7 +231,12 @@ async function readLimitedBuffer(url, limit) {
   } finally {
     try { reader.releaseLock(); } catch {}
   }
-  return { buffer: Buffer.concat(chunks), contentType: res.headers.get('content-type') || '' };
+  const buffer = Buffer.concat(chunks);
+  const sample = buffer.toString('utf8', 0, Math.min(buffer.length, 512)).trimStart().toLowerCase();
+  if (sample.startsWith('<!doctype html') || sample.startsWith('<html') || sample.startsWith('<head') || sample.includes('<meta')) {
+    throw new Error('source returned an HTML page instead of a video file');
+  }
+  return { buffer, contentType: res.headers.get('content-type') || '' };
 }
 
 class ByteLimit extends Transform {
@@ -268,7 +293,7 @@ async function download(c, m, title, slot) {
       );
     }
 
-    if (!res.body) throw new Error('Movie response has no body');
+    if (!res.body || !opened.stream) throw new Error('Movie response is not a valid media stream');
     const contentType = (res.headers.get('content-type') || '').toLowerCase();
     const selectedUrl = opened.url;
     const isMkv = contentType.includes('matroska') || /\.mkv(?:\?|$)/i.test(selectedUrl || d.url || '');
@@ -285,32 +310,24 @@ async function download(c, m, title, slot) {
     const targetUrl = selectedUrl;
     log(`sending ${fileName} (${size ? fmtSize(size) : 'unknown size'})`);
 
-    // Same first path as Dark Queen/Cinesubz: let Baileys stream the remote
-    // URL directly, so the whole movie is not loaded into Heroku RAM.
+    // Stream the already validated response body. We intentionally do not
+    // pass { url } to Baileys because this API can return an HTML challenge
+    // with a forged video/mp4 content-type on a second request.
     try {
+      source = opened.stream.pipe(new ByteLimit(MAX_BYTES));
       await c.sock.sendMessage(c.from, {
-        document: { url: targetUrl }, mimetype, fileName, caption,
+        document: { stream: source }, mimetype, fileName, caption,
       }, { quoted: c.m });
-    } catch (urlError) {
-      log(`direct URL send failed: ${clean(urlError.message)}`);
-      // Second path: pipe the response body without buffering the complete
-      // file, useful when Baileys rejects a remote URL source.
-      try {
-        source = Readable.fromWeb(res.body).pipe(new ByteLimit(MAX_BYTES));
-        await c.sock.sendMessage(c.from, {
-          document: { stream: source }, mimetype, fileName, caption,
-        }, { quoted: c.m });
-      } catch (streamError) {
-        log(`stream send failed: ${clean(streamError.message)}`);
-        if (size && size > MAX_BUFFER_BYTES) throw streamError;
-        const buffered = await readLimitedBuffer(targetUrl, MAX_BUFFER_BYTES);
-        await c.sock.sendMessage(c.from, {
-          document: buffered.buffer,
-          mimetype: buffered.contentType.startsWith('video/') ? buffered.contentType.split(';')[0] : mimetype,
-          fileName,
-          caption,
-        }, { quoted: c.m });
-      }
+    } catch (streamError) {
+      log(`stream send failed: ${clean(streamError.message)}`);
+      if (size && size > MAX_BUFFER_BYTES) throw streamError;
+      const buffered = await readLimitedBuffer(targetUrl, MAX_BUFFER_BYTES);
+      await c.sock.sendMessage(c.from, {
+        document: buffered.buffer,
+        mimetype: buffered.contentType.startsWith('video/') ? buffered.contentType.split(';')[0] : mimetype,
+        fileName,
+        caption,
+      }, { quoted: c.m });
     }
     log('sent OK');
   } catch (e) {
